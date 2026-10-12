@@ -1,0 +1,37 @@
+# 데이터 (용량이 크고 재배포 대상이 아님)
+data/
+*.csv
+*.csv.gz
+*.parquet
+# 단, 그림용 집계 CSV와 측정 결과는 올린다(원본 행이 없는 집계값)
+!docs/portfolio/data/
+!docs/portfolio/data/*.csv
+!bench/*.csv
+
+# 비밀 정보
+kaggle.json
+.env
+*.pem
+
+# Claude Code 개인 설정
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 기타
+.DS_Store
+.idea/
+logs/
+
+# 3단계 lake jar (jars/fetch.sh로 받는다, ADR 0006)
+jars/*.jar
+
+# GCP 스프린트 Terraform (상태 파일에 자원 id가 담긴다. 프로젝트 id는 tfvars에만 둔다)
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars

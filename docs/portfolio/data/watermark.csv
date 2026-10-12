@@ -1,0 +1,4 @@
+watermark_min,dropped_events,sent_later_than_watermark,state_windows_max
+5,3543,17929,11
+10,1295,3744,16
+20,0,0,26

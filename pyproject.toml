@@ -1,0 +1,15 @@
+[project]
+name = "study"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pyspark==4.1.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -1,0 +1,5 @@
+job,env,in_stages_s,driver_only_s,outside_app_s,source
+load,local,7.7,2.1,0.7,ADR 0005 (spark_once; Airflow 제외)
+load,dataproc,63.6,16.7,21.2,ADR 0008 (이벤트 로그 + Airflow 태스크 101.5초)
+quality,local,6.5,2.4,0.9,ADR 0005 (spark_once; Airflow 제외)
+quality,dataproc,61.4,21.1,29.2,ADR 0008 (이벤트 로그 + Airflow 태스크 111.6초)

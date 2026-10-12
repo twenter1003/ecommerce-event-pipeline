@@ -1,0 +1,220 @@
+# 로컬 Airflow 3.3.1, LocalExecutor. 설계는 ADR 0004.
+# 태스크는 scheduler 컨테이너 안에서 돌고, Spark도 거기서 local 모드로 돈다.
+#   docker compose up -d --build     → http://localhost:8080 (로컬 전용, 로그인 없음)
+x-airflow: &airflow
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: study-airflow:3.3.1
+  user: "50000:0"
+  # 비정상 종료 때만 다시 띄운다. 스케줄러가 죽은 채로 있으면 백필이 알림 없이 멈추기 때문이다.
+  restart: on-failure
+  environment: &env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Airflow 전체 동시 태스크 상한(ADR 0001). 스트레스 측정 때만 AIRFLOW_PARALLELISM으로 올린다.
+    AIRFLOW__CORE__PARALLELISM: ${AIRFLOW_PARALLELISM:-4}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # 끝난 날짜만 있는 DAG라 일시정지를 풀어도 정기 run이 생기지 않는다. 백필은 일시정지면 진행되지 않는다.
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    # 로컬 전용: 로그인 없이 모두 관리자. 포트는 127.0.0.1에만 연다.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # 구성 요소들이 서로 발급·검증하는 토큰 키. 모두 같은 값이어야 한다. 기본값을 두지 않는다.
+    # 저장소에 적힌 고정 키는 그대로 다른 곳에 올라가면 누구나 관리자 토큰을 위조할 수 있다.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?.env에 넣는다(.env.example 참고)}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # 실패 알림. .env에 웹훅을 넣기 전까지는 알림이 로그 한 줄로 대신 남는다.
+    AIRFLOW_CONN_SLACK_ALERT: ${AIRFLOW_CONN_SLACK_ALERT:-}
+    # Spark 드라이버 힙. 코드의 8g보다 우선한다. 힙 밖 메모리까지 더한 실제 사용량은 최대 2.2GiB다(ADR 0005).
+    PYSPARK_SUBMIT_ARGS: --driver-memory 2g pyspark-shell
+    PYTHONPATH: /opt/airflow/project
+    EVENTS_LANDING: /opt/airflow/data/landing/events
+    EVENTS_WAREHOUSE: /opt/airflow/data/warehouse/events
+    # 3단계 lake(ADR 0006). 계정은 위 Airflow DB와 같은 로컬 전용 airflow/airflow이고, 포트는 열지 않는다
+    LAKE_JARS: /opt/airflow/project/jars
+    LAKE_CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg?user=airflow&password=airflow
+    # S3FileIO가 AWS 기본 자격 증명 체인으로 읽는다. Spark 설정에 넣지 않아 명령줄과 이벤트 로그에 남지 않는다.
+    # .env에는 AWS_* 이름을 쓰지 않는다. 셸에 진짜 AWS 키가 export돼 있으면 compose 치환이 그 값을 먼저 집는다.
+    AWS_ACCESS_KEY_ID: ${LAKE_S3_ACCESS_KEY:?.env에 넣는다(.env.example 참고)}
+    AWS_SECRET_ACCESS_KEY: ${LAKE_S3_SECRET_KEY:?.env에 넣는다(.env.example 참고)}
+    AWS_REGION: us-east-1
+    # SeaweedFS 4.48 버그 #11582 우회: SDK 2.30 이상의 기본 체크섬 trailer 업로드가 약 50% 확률로 400 InvalidDigest.
+    # 수정이 들어간 버전(4.49 이상)으로 올리면 두 줄을 지운다(ADR 0006 결정 2).
+    AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+    AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./pipeline:/opt/airflow/project/pipeline:ro
+    - ./data:/opt/airflow/data
+    - ./jars:/opt/airflow/project/jars:ro
+  depends_on: &depends
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    restart: on-failure
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    restart: on-failure
+    entrypoint: ["/bin/sh", "-c"]
+    # 키 파일을 저장소에도 호스트에도 두지 않는다. 시작할 때마다 env로 컨테이너 /tmp에 만든다.
+    # 키 없이 띄우면 누구나 읽고 쓸 수 있게 열린다(allow-all). 그 방식은 쓰지 않는다.
+    command:
+      - |
+        printf '{"identities":[{"name":"spark","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List"]}]}' "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
+        exec weed mini -dir=/data -s3.config=/tmp/s3.json -bucket=warehouse
+    environment:
+      S3_ACCESS_KEY: ${LAKE_S3_ACCESS_KEY:?.env에 넣는다}
+      S3_SECRET_KEY: ${LAKE_S3_SECRET_KEY:?.env에 넣는다}
+    volumes:
+      - seaweedfs-data:/data
+    # 호스트에 포트를 열지 않는다. 관리 화면(23646)은 weed mini 기본값이 인증 없음이라, 열면 S3 키 없이 버킷을 고칠 수 있다.
+    # 관리는 `docker compose exec seaweedfs weed shell`로 한다(ADR 0006 결정 2).
+
+  # lake 준비(ADR 0006 결정 6). Airflow 서비스는 이것에 의존하지 않는다. 실패해도 1·2단계는 그대로 돈다.
+  lake-init:
+    <<: *airflow
+    restart: "no"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        # 마운트된 jar가 SHA256SUMS와 같은지 먼저 본다(받다 끊긴 jar로 원인 모를 오류가 나지 않게)
+        (cd /opt/airflow/project/jars && sha256sum -c --quiet SHA256SUMS)
+        # 카탈로그 DB. 기존 Postgres 볼륨에서는 initdb 스크립트가 다시 돌지 않아 여기서 만든다. 두 번 돌려도 안전하다
+        python -c "import psycopg2; c = psycopg2.connect(host='postgres', dbname='airflow', user='airflow', password='airflow'); c.autocommit = True; k = c.cursor(); k.execute(\"select 1 from pg_database where datname = 'iceberg'\"); k.fetchone() or k.execute('create database iceberg')"
+        # 버킷이 아직 없을 수 있다(weed mini 시작 직후). 테이블 만들기를 몇 번 다시 시도한다
+        for i in 1 2 3 4 5; do python -m pipeline.lake create && exit 0; echo "lake create 재시도 $$i" >&2; sleep 10; done
+        exit 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  airflow-init:
+    <<: *airflow
+    restart: "no"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs
+        /entrypoint airflow version
+        # Spark 태스크 동시 실행 상한. JVM 1개 ≈ 2.2GiB라 Docker VM 9.7GiB에 3개까지 들어가고 4개면 넘친다(ADR 0005).
+        # 평소에는 여유를 두고 2개. 대량 백필 때만 bench/backfill.sh가 3으로 올렸다가 되돌린다.
+        /entrypoint airflow pools set spark 2 "Spark local mode tasks"
+    environment:
+      <<: *env
+      _AIRFLOW_DB_MIGRATE: "true"
+
+  airflow-apiserver:
+    <<: *airflow
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 4단계 Kafka(ADR 0009 결정 2). stream 프로필이라 `docker compose --profile stream up -d kafka`로만 뜬다.
+  # 호스트 포트는 열지 않는다. 재생기와 Spark는 같은 compose 네트워크에서 kafka:9092로 닿는다.
+  # 데이터는 컨테이너 안(/tmp/kraft-combined-logs)에 둔다. stop/start에는 남고 down에는 지워진다(다시 재생하면 된다).
+  kafka:
+    image: apache/kafka:4.3.1
+    profiles: ["stream"]
+    restart: on-failure
+    environment:
+      # 단일 노드 KRaft: 한 프로세스가 브로커와 컨트롤러(메타데이터 관리)를 겸한다. ZooKeeper는 4.0에서 없어졌다
+      CLUSTER_ID: GZfndjUWRliSbaRHVAZKBQ
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # 브로커가 하나라 내부 토픽(컨슈머 오프셋, 트랜잭션 기록)의 복제도 1이다
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 토픽은 재생기가 만든다. 오타 난 토픽 이름이 조용히 새 토픽이 되지 않게 자동 생성을 끈다
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      retries: 10
+      start_period: 20s
+
+  # 4단계 실시간 집계(ADR 0009 결정 4). 끝나지 않는 잡이라 Airflow 태스크가 아니라 별도 프로세스로 띄운다.
+  #   docker compose --profile stream run -d --name stream-e1 stream run --topic events_e1
+  # 강제 종료 실험: docker kill stream-e1 → docker start stream-e1 (같은 인자, 같은 체크포인트로 다시 뜬다)
+  stream:
+    <<: *airflow
+    profiles: ["stream"]
+    restart: "no"
+    entrypoint: ["python", "-m", "pipeline.stream_funnel"]
+    command: ["run"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-db:
+  seaweedfs-data:
