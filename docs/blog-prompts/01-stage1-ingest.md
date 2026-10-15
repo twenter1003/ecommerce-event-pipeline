@@ -1,6 +1,6 @@
 # 01. 1단계 적재: 멱등 적재·날짜 파티션·완전 중복 제거
 
-- 대상 코드: `pipeline/split_raw.py`, `pipeline/load_events.py`, `pipeline/spark.py`, `tests/test_stage1.py`
+- 대상 코드: `pipeline/split_raw.py`, `pipeline/load_events.py`, `pipeline/spark.py`, `tests/test_pipeline.py`
 - 설계 기록: [ADR 0003](../decisions/0003-stage1-ingest.md)
 - 상태: 미답변
 
