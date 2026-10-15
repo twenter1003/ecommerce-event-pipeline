@@ -45,6 +45,8 @@ flowchart LR
   gcp[GCP 스프린트<br/>Composer + Dataproc<br/>Terraform] -. 같은 DAG .-> load
 ```
 
+모듈 의존성, DAG 관계, 테이블 ERD, 핵심 로직, 개선점과 코드 리뷰는 [아키텍처 가이드](docs/architecture-guide.md)에 풀어 썼습니다.
+
 ## 숫자로 보는 결과
 결과마다 "어떻게 맞는지 확인했나"를 같이 적었습니다. 자세한 측정과 해석은 각 ADR에 있습니다.
 
