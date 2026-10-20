@@ -7,7 +7,7 @@
 - --artifact: 같은 리포트를 문서 뼈대(doctype·head·body) 없이 쓴다(claude.ai 아티팩트 게시용)
 표준 라이브러리만 쓴다. 색은 dataviz 지침의 검증된 팔레트다(범주 3색은 validate_palette.js로 두 테마 통과).
 차트의 숫자는 모두 data/*.csv에서 온다. 그 CSV는 warehouse·lake·측정 기록에서 뽑은 집계값이고, 원본 이벤트는 재배포하지 않는다.
-머리말 숫자(KPIS)는 README '숫자로 보는 결과'와 같은 값이다.
+머리말 숫자(KPIS)는 README '분석 결과'·'파이프라인 성능'과 같은 값이다.
 """
 import csv
 import html
